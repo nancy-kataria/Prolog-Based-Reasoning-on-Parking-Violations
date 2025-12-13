@@ -1,8 +1,3 @@
-% :- module(overnight_parking, [
-%    may_park_overnight/3,
-%    overnight_violation/5
-% ]).
-
 % Facts
 
 overnight_lot(s8).
@@ -16,10 +11,6 @@ overnight_hour(Hour) :-
 storage_limit_hours(72).
 
 % Rules
-
-
-%  applies during overnight hours. Outside of those
-%  hours this predicate simply fails (overnight rule not applicable).
 
 may_park_overnight(Lot, time(_Date, Hour), HasValidPermit) :-
     overnight_hour(Hour),
