@@ -107,13 +107,27 @@ question(near_object,
          select,
          [none, fire_hydrant, building_entrance, disabled_access_ramp]).
 
+question(special_zone,
+         "Are you parked in any of these? (No Parking, Fire Lane, Tow Away zone)",
+         select,
+         [none, no_parking, fire_lane, tow_away_zone]).
+
+
 
 % Student flow 
 
 student_flow(A, Response) :-
-    % Need student_permit, lot, hour first
-    (   \+ _{student_permit:_} :< A
+    (   % student permit
+        \+ _{student_permit:_} :< A
     ->  question_dict(student_permit, Response)
+
+        % If no valid permit → immediate violation 
+    ;   A.student_permit \== true
+    ->  violation_response(A.goal, no_student_permit,
+                           "You do not have a valid student parking permit.",
+                           Response)
+
+        % ask lot & time
     ;   \+ _{lot:_} :< A
     ->  question_dict(lot, Response)
     ;   \+ _{hour:_} :< A
@@ -121,39 +135,36 @@ student_flow(A, Response) :-
     ;   early_student_decision(A, Response)
     ).
 
-early_student_decision(A, Response) :-
-    HasPermit = A.student_permit,
-    Lot       = A.lot,
-    Hour      = A.hour,
 
-    % no permit + wrong lot
-    (   HasPermit \== true,
+early_student_decision(A, Response) :-
+    Lot  = A.lot,
+    Hour = A.hour,
+
+    (   % wrong lot for students (not student & not faculty lot at all)
         \+ student_lot(Lot),
-        \+ faculty_lot(Lot)
-    ->  violation_response(A.goal, no_permit_wrong_lot,
-                           "You do not have a permit and are not in a valid lot.",
-                           Response)
-    ;   HasPermit \== true
-    ->  violation_response(A.goal, no_student_permit,
-                           "You do not have a valid student parking permit.",
-                           Response)
-    ;   \+ student_lot(Lot),
         \+ faculty_lot(Lot)
     ->  violation_response(A.goal, wrong_lot_for_student,
                            "That lot is not allowed for student parking.",
                            Response)
+
+        % faculty lot before 5pm is not allowed for students
     ;   faculty_lot(Lot),
         Hour < 17
     ->  violation_response(A.goal, faculty_lot_before_5pm,
                            "Faculty lot before 5pm is not allowed for students.",
                            Response)
+
+        % overnight violation with a (valid) student permit
     ;   overnight_hour(Hour),
-        overnight_violation(Lot, time(_,Hour), HasPermit, 0, Reason)
+        overnight_violation(Lot, time(_,Hour), A.student_permit, 0, Reason)
     ->  violation_response(A.goal, Reason,
                            "Your car would be in violation of overnight rules.",
                            Response)
+
+        % otherwise continue with space type / curb / proximity
     ;   continue_student_location(A, Response)
     ).
+
 
 continue_student_location(A, Response) :-
     (   \+ _{space_type:_} :< A
@@ -170,11 +181,16 @@ continue_student_location(A, Response) :-
     ).
 
 continue_student_curb_and_distances(A, Response) :-
-    (   \+ _{curb_color:_} :< A
-    ->  question_dict(curb_color, Response)
-    ;   % try curb-color based violations first using your big predicate
+    (   \+ _{special_zone:_} :< A
+    ->  % Ask if they are in No Parking / Fire Lane / Tow Away
+        question_dict(special_zone, Response)
+    ;   \+ _{curb_color:_} :< A
+    ->  % Then ask about curb color
+        question_dict(curb_color, Response)
+    ;   % Now handle special zone, curb color, and then proximity
         curb_violation_or_continue(A, Response)
     ).
+
 
 curb_violation_or_continue(A, Response) :-
     Lot     = A.lot,
@@ -182,24 +198,43 @@ curb_violation_or_continue(A, Response) :-
     Permit  = A.student_permit,
     Space   = A.space_type,
     Curb    = A.curb_color,
+    Special = A.special_zone,
 
-    (   student_parking_violation(Lot, Hour,
+    (   
+        Special == no_parking
+    ->  violation_response(A.goal, no_parking_zone,
+            "You are parked in a No Parking zone. You cannot park here.",
+            Response)
+
+    ;   Special == tow_away_zone
+    ->  violation_response(A.goal, tow_away_zone,
+            "You are parked in a Tow Away zone. You cannot park here.",
+            Response)
+
+    ;   Special == fire_lane
+    ->  violation_response(A.goal, fire_lane_zone,
+            "You are parked in a fire lane. You cannot park here.",
+            Response)
+
+    ;   student_parking_violation(Lot, Hour,
             Permit, false,
             Space, _,_,_,
             Curb, false,
-            none, false,
+            Special, false,
             Reason)
     ->  violation_response(A.goal, Reason,
             "This curb color makes parking here a violation.",
             Response)
+
     ;   Space == regular
-    ->  % regular space: ask combined proximity question
-        near_object_or_finish(A, Response)
-    ;   % disabled space with permit and no curb issue
-        ok_response(A.goal,
+    ->  near_object_or_finish(A, Response)
+
+        % Disabled space with valid permit, no curb/zone issues
+    ;   ok_response(A.goal,
                     "Your parking appears allowed with your disabled permit.",
                     Response)
     ).
+
 
 
 near_object_or_finish(A, Response) :-
@@ -219,7 +254,7 @@ near_object_or_finish(A, Response) :-
 violation_from_near_object(A, Response) :-
     (   A.near_object == fire_hydrant
     ->  violation_response(A.goal, too_close_to_fire_hydrant,
-        "You are parked within 15 ft of a fire hydrant, which is not allowed.",
+        "You are parked within 15 ft of a fire hydrant. which is not allowed.",
         Response)
     ;   A.near_object == building_entrance
     ->  violation_response(A.goal, too_close_to_building,
@@ -235,8 +270,17 @@ violation_from_near_object(A, Response) :-
 %  Faculty flow 
 
 faculty_flow(A, Response) :-
-    (   \+ _{faculty_permit:_} :< A
+    (   % Ask for faculty permit first
+        \+ _{faculty_permit:_} :< A
     ->  question_dict(faculty_permit, Response)
+
+        %  If no valid permit → immediate violation
+    ;   A.faculty_permit \== true
+    ->  violation_response(A.goal, no_faculty_permit,
+                           "You do not have a valid faculty/staff permit.",
+                           Response)
+
+        % Only if they DO have a permit, ask lot & time
     ;   \+ _{lot:_} :< A
     ->  question_dict(lot, Response)
     ;   \+ _{hour:_} :< A
@@ -244,21 +288,17 @@ faculty_flow(A, Response) :-
     ;   early_faculty_decision(A, Response)
     ).
 
-early_faculty_decision(A, Response) :-
-    HasPermit = A.faculty_permit,
-    Lot       = A.lot,
-    Hour      = A.hour,
 
-    (   HasPermit \== true
-    ->  violation_response(A.goal, no_faculty_permit,
-                           "You do not have a valid faculty/staff permit.",
-                           Response)
-    ;   \+ may_park(Lot, HasPermit)
+early_faculty_decision(A, Response) :-
+    Lot  = A.lot,
+    Hour = A.hour,
+
+    (   \+ may_park(Lot, A.faculty_permit)
     ->  violation_response(A.goal, wrong_lot_for_faculty,
                            "Your permit is not valid for this lot.",
                            Response)
     ;   overnight_hour(Hour),
-        overnight_violation(Lot, time(_,Hour), HasPermit, 0, Reason)
+        overnight_violation(Lot, time(_,Hour), A.faculty_permit, 0, Reason)
     ->  violation_response(A.goal, Reason,
                            "This would violate overnight faculty parking rules.",
                            Response)
@@ -266,6 +306,7 @@ early_faculty_decision(A, Response) :-
                     "Your parking appears to be allowed.",
                     Response)
     ).
+
 
 %  Helper constructors for responses 
 
